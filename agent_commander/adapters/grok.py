@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 from typing import Optional
 import urllib.parse
 import uuid
@@ -68,24 +69,28 @@ class GrokAdapter(BasePlatformAdapter):
                         message_count += 1
 
                     if mtype == "user" and not title:
+                        raw = ""
                         if isinstance(content, str):
-                            # Exclude initial system / user_info blocks
-                            cleaned = content
-                            if "<user_info>" in cleaned:
-                                lines = [l for l in cleaned.splitlines() if not l.startswith("<") and not l.endswith(">")]
-                                cleaned = "\n".join(lines).strip()
-                            if cleaned:
-                                title = cleaned.splitlines()[0]
+                            raw = content
                         elif isinstance(content, list):
                             for block in content:
                                 if isinstance(block, dict) and block.get("type") == "text":
-                                    txt = block.get("text", "").strip()
-                                    if "<user_info>" in txt:
-                                        lines = [l for l in txt.splitlines() if not l.startswith("<") and not l.endswith(">")]
-                                        txt = "\n".join(lines).strip()
-                                    if txt:
-                                        title = txt.splitlines()[0]
-                                        break
+                                    raw = block.get("text", "")
+                                    break
+                                elif isinstance(block, str):
+                                    raw = block
+                                    break
+
+                        m = re.search(r"<user_query>(.*?)(?:</user_query>|$)", raw, re.DOTALL)
+                        if m:
+                            q = m.group(1).strip()
+                            if q:
+                                title = q.splitlines()[0].strip()
+                        elif raw.strip():
+                            if not raw.startswith("<user_info>") and not raw.startswith("<system-reminder>"):
+                                is_xml = raw.startswith("<") and (">" in raw.splitlines()[0] or raw.endswith(">"))
+                                if not is_xml:
+                                    title = raw.strip().splitlines()[0].strip()
                 except Exception:
                     continue
 
@@ -142,6 +147,14 @@ class GrokAdapter(BasePlatformAdapter):
                                         args=b.get("input", {}),
                                     ))
                         text = "\n".join(parts)
+
+                    if mtype == "user":
+                        m = re.search(r"<user_query>(.*?)(?:</user_query>|$)", text, re.DOTALL)
+                        if m:
+                            text = m.group(1).strip()
+                        elif text.startswith("<system-reminder>"):
+                            # Skip standalone system reminders in conversation viewer
+                            continue
 
                     if text.strip() or thinking or tool_calls:
                         messages.append(UnifiedMessage(
