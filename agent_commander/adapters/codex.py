@@ -71,7 +71,9 @@ class CodexAdapter(BasePlatformAdapter):
         model = None
 
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line_idx in range(25):
+            for line_idx in range(60):
+                if line_idx > 20 and title:
+                    break
                 line = f.readline()
                 if not line:
                     break
@@ -99,18 +101,24 @@ class CodexAdapter(BasePlatformAdapter):
                             role = payload.get("role", "")
                             content = payload.get("content", [])
                             if role == "user" and not title:
+                                txt = ""
                                 if isinstance(content, str):
-                                    title = content.strip().splitlines()[0]
+                                    txt = content.strip()
                                 elif isinstance(content, list):
                                     for item in content:
                                         if isinstance(item, dict) and item.get("type") in ("text", "input_text"):
-                                            txt = item.get("text", "").strip()
-                                            if txt:
-                                                title = txt.splitlines()[0]
+                                            t = item.get("text", "").strip()
+                                            if t:
+                                                txt = t
                                                 break
                                         elif isinstance(item, str) and item.strip():
-                                            title = item.strip().splitlines()[0]
+                                            txt = item.strip()
                                             break
+                                
+                                # Skip system-injected tags masquerading as user messages
+                                is_xml_tag = txt.startswith("<") and (">" in txt.splitlines()[0] or txt.endswith(">"))
+                                if txt and not is_xml_tag:
+                                    title = txt.splitlines()[0].strip()
                         elif ptype == "turn_context" and not model:
                             model = payload.get("model")
                 except Exception:

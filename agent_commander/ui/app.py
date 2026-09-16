@@ -75,7 +75,7 @@ class AgentCommanderApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            f" 🎖️ Agent Commander v{__version__} │ Norton Commander for AI Agent Histories",
+            f" [bold]≡ AGENT COMMANDER v{__version__} ≡[/]   [italic]Norton Commander for AI Agent Histories[/]",
             id="title-bar",
         )
         yield DualPaneCommander(

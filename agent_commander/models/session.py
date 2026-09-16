@@ -56,6 +56,13 @@ class UnifiedSession:
         return "Unknown Date"
 
     @property
+    def date_short(self) -> str:
+        dt = self.updated_at or self.created_at
+        if dt:
+            return dt.strftime("%m-%d %H:%M")
+        return "Unknown"
+
+    @property
     def size_str(self) -> str:
         if self.size_bytes < 1024:
             return f"{self.size_bytes} B"

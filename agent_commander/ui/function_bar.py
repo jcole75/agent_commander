@@ -34,6 +34,9 @@ class FunctionBar(Widget):
     def compose(self) -> ComposeResult:
         items = []
         for num, label in self.KEYS:
-            items.append(f"[@click=app.fn_action('{num}')][bold black on #00aaaa]{num:>2}[/][bold white on black]{label:<6}[/][/]")
+            key_tag = f"F{num}" if num.isdigit() and int(num) < 10 else num
+            items.append(
+                f"[@click=app.fn_action('{num}')][bold black on #00aaaa] {key_tag} [/][bold white on #000040] {label} [/][/]"
+            )
         bar_text = " ".join(items)
         yield Static(bar_text, markup=True)

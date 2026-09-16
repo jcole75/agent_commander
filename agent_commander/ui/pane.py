@@ -63,11 +63,10 @@ class CommanderPane(Widget):
     def on_mount(self) -> None:
         table = self.query_one(f"#{self.pane_id}-table", DataTable)
         table.add_column("Tag", width=4)
-        table.add_column("Date / Time", width=17)
-        table.add_column("Prompt / Title", width=None)
+        table.add_column("Date", width=12)
         table.add_column("Turns", width=6)
         table.add_column("Size", width=8)
-        table.add_column("ID", width=13)
+        table.add_column("Prompt / Title", width=None)
         self.refresh_sessions()
 
     def set_active(self, active: bool) -> None:
@@ -117,11 +116,10 @@ class CommanderPane(Widget):
             title_text = session.title or f"Session {session.short_id}"
             table.add_row(
                 tag_str,
-                session.date_str,
-                title_text,
+                session.date_short,
                 str(session.message_count),
                 session.size_str,
-                session.short_id,
+                title_text,
                 key=f"{session.id}_{idx}",
             )
 
@@ -150,10 +148,16 @@ class CommanderPane(Widget):
         tagged_size_str = f"{tagged_bytes / 1024:.1f} KB" if tagged_bytes < 1024 * 1024 else f"{tagged_bytes / (1024*1024):.1f} MB"
         total_size_str = f"{total_bytes / 1024:.1f} KB" if total_bytes < 1024 * 1024 else f"{total_bytes / (1024*1024):.1f} MB"
 
+        cur = self.get_current_session()
+        active_info = f" | [bold yellow]{cur.short_id}[/] ({cur.model or 'Agent'})" if cur else ""
+
         status.update(
-            f"Tagged: [bold]{len(tagged)}[/] ({tagged_size_str})  |  "
-            f"Total: [bold]{len(self.sessions)}[/] ({total_size_str})"
+            f"Tagged: [bold]{len(tagged)}[/] ({tagged_size_str}) | "
+            f"Total: [bold]{len(self.sessions)}[/] ({total_size_str}){active_info}"
         )
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        self._update_status()
 
     def toggle_tag_current(self) -> None:
         session = self.get_current_session()
