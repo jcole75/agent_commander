@@ -1,6 +1,8 @@
 """Conversation viewer modal screen."""
 
 from __future__ import annotations
+import json
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen
@@ -27,12 +29,12 @@ class ConversationViewer(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="viewer-box"):
             with Vertical(id="viewer-header"):
-                yield Static(f"[bold yellow]{self.session.title}[/]")
+                yield Static(f"[bold yellow]{escape(self.session.title)}[/]")
                 yield Static(
-                    f"Platform: [bold]{self.session.platform.display_name}[/] | "
-                    f"Model: {self.session.model or 'Unknown'} | "
-                    f"Date: {self.session.date_str} | "
-                    f"Path: [italic]{self.session.raw_path}[/]"
+                    f"Platform: [bold]{escape(self.session.platform.display_name)}[/] | "
+                    f"Model: {escape(self.session.model or 'Unknown')} | "
+                    f"Date: {escape(self.session.date_str)} | "
+                    f"Path: [italic]{escape(str(self.session.raw_path))}[/]"
                 )
 
             with ScrollableContainer(id="viewer-scroll"):
@@ -54,22 +56,21 @@ class ConversationViewer(ModalScreen[None]):
                         if msg.thinking:
                             with Vertical(classes="message-thinking"):
                                 yield Static("[bold yellow]Thinking / Chain of Thought:[/]")
-                                yield Static(msg.thinking)
+                                yield Static(str(msg.thinking), markup=False)
 
                         if msg.content:
-                            yield Static(msg.content)
+                            yield Static(str(msg.content), markup=False)
 
                         for tc in msg.tool_calls:
-                            yield Static(f"[bold magenta]⚡ Tool Call:[/] [bold]{tc.name}[/]")
+                            yield Static(f"[bold magenta]⚡ Tool Call:[/] [bold]{escape(tc.name)}[/]")
                             if tc.args:
-                                import json
                                 try:
                                     args_str = json.dumps(tc.args, indent=2)
                                 except Exception:
                                     args_str = str(tc.args)
-                                yield Static(f"[dim]{args_str}[/]")
+                                yield Static(args_str, markup=False)
                             if tc.output:
-                                yield Static(f"[italic]Output: {tc.output[:500]}[/]")
+                                yield Static(f"Output:\n{tc.output[:1500]}", markup=False)
 
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Resume in Agent CLI", id="btn-resume", variant="success")

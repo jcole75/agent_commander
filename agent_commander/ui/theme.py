@@ -164,21 +164,25 @@ Screen {
     padding: 1;
     border: round #00aaaa;
     background: #000066;
+    color: #ffffff;
 }
 
 .message-user {
     border: round #55ff55;
     background: #000055;
+    color: #ffffff;
 }
 
 .message-assistant {
     border: round #55ffff;
     background: #000077;
+    color: #ffffff;
 }
 
 .message-thinking {
     border: dashed #ffff55;
     color: #ffffaa;
+    background: #000044;
     margin: 1 0;
     padding: 0 1;
 }

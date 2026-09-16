@@ -192,14 +192,29 @@ class CodexAdapter(BasePlatformAdapter):
                                 ))
 
                         elif ptype == "reasoning":
-                            summary = payload.get("summary") or ""
-                            content = payload.get("content") or ""
+                            def _extract_text(obj) -> str:
+                                if isinstance(obj, str):
+                                    return obj
+                                elif isinstance(obj, list):
+                                    items = []
+                                    for item in obj:
+                                        if isinstance(item, str):
+                                            items.append(item)
+                                        elif isinstance(item, dict):
+                                            txt = item.get("text") or item.get("content") or ""
+                                            if txt:
+                                                items.append(txt)
+                                    return "\n".join(items)
+                                return str(obj) if obj else ""
+
+                            summary = _extract_text(payload.get("summary"))
+                            content = _extract_text(payload.get("content"))
                             thinking_text = summary or content
-                            if thinking_text:
+                            if thinking_text.strip():
                                 messages.append(UnifiedMessage(
                                     role="assistant",
                                     content="",
-                                    thinking=thinking_text,
+                                    thinking=thinking_text.strip(),
                                     timestamp=ts,
                                 ))
 
