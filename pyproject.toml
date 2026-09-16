@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-commander"
+version = "0.1.0"
+description = "Orthodox dual-pane CLI app styled after Norton Commander for managing, viewing, cross-copying, and resuming agent conversations across Codex, AGY, Claude Code, and Grok Build."
+readme = "README.md"
+authors = [
+    { name = "J. Cole", email = "jcole@example.com" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "textual>=0.80.0",
+    "rich>=13.0.0",
+    "click>=8.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+agent-commander = "agent_commander.cli:main"
+agent_commander = "agent_commander.cli:main"
+ac = "agent_commander.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_commander*"]
