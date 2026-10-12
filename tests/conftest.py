@@ -19,6 +19,8 @@ def agent_home(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    # Archive/delete use file moves, not an installed agent CLI, unless a test opts in.
+    monkeypatch.setenv("AC_NO_AGENT_CLI", "1")
     registry._INSTANCES.clear()
     yield home
     registry._INSTANCES.clear()

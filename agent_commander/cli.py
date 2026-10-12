@@ -16,13 +16,14 @@ from agent_commander.models.session import UnifiedSession
 PLATFORM_CHOICE = click.Choice([p.value for p in AgentPlatform], case_sensitive=False)
 
 
-def _find_session(session_id: str, platform: Optional[str]) -> UnifiedSession:
+def _find_session(session_id: str, platform: Optional[str], archived: bool = False) -> UnifiedSession:
     """Find a session by full id or unique id prefix, optionally on one platform."""
     platforms = [AgentPlatform(platform.lower())] if platform else list(AgentPlatform)
     matches = []
     for p in platforms:
+        adapter = get_adapter(p)
         try:
-            sessions = get_adapter(p).scan_sessions(limit=10_000)
+            sessions = adapter.scan_archived_sessions(limit=10_000) if archived else adapter.scan_sessions(limit=10_000)
         except Exception:
             continue
         matches.extend(s for s in sessions if s.id == session_id or s.id.startswith(session_id))
@@ -79,16 +80,66 @@ def main(ctx: click.Context, left: str, right: str, list_platforms: bool) -> Non
     app.run()
 
 
-@main.command(name="list")
-@click.argument("platform", type=PLATFORM_CHOICE)
-@click.option("--limit", "-n", default=30, show_default=True, help="How many sessions to show, newest first.")
-def list_sessions(platform: str, limit: int) -> None:
-    """List sessions for PLATFORM (codex, claude, agy, grok)."""
-    sessions = get_adapter(AgentPlatform(platform.lower())).scan_sessions(limit=limit)
+def _print_sessions(sessions: list[UnifiedSession]) -> None:
     for s in sessions:
         click.echo(f"{s.id}  {s.date_str}  {s.message_count:>4}  {s.title}")
     if not sessions:
         click.echo("No sessions found.")
+
+
+@main.command(name="list")
+@click.argument("platform", type=PLATFORM_CHOICE)
+@click.option("--limit", "-n", default=30, show_default=True, help="How many sessions to show, newest first.")
+@click.option("--archived", is_flag=True, help="List archived sessions instead.")
+def list_sessions(platform: str, limit: int, archived: bool) -> None:
+    """List sessions for PLATFORM (codex, claude, agy, grok)."""
+    adapter = get_adapter(AgentPlatform(platform.lower()))
+    _print_sessions(adapter.scan_archived_sessions(limit=limit) if archived else adapter.scan_sessions(limit=limit))
+
+
+@main.command()
+@click.argument("platform", type=PLATFORM_CHOICE)
+@click.argument("text")
+@click.option("--archived", is_flag=True, help="Search archived sessions instead.")
+def search(platform: str, text: str, archived: bool) -> None:
+    """List PLATFORM sessions whose conversation mentions TEXT (case-insensitive)."""
+    adapter = get_adapter(AgentPlatform(platform.lower()))
+    sessions = adapter.scan_archived_sessions(limit=10_000) if archived else adapter.scan_sessions(limit=10_000)
+    _print_sessions([s for s in sessions if adapter.contains_text(s, text)])
+
+
+@main.command()
+@click.argument("session_id")
+@click.option("--from", "source", type=PLATFORM_CHOICE, help="Only look for SESSION_ID on this platform.")
+def archive(session_id: str, source: Optional[str]) -> None:
+    """Move a session into the archive (undo with `restore`)."""
+    session = _find_session(session_id, source)
+    path = get_adapter(session.platform).archive_session(session)
+    click.echo(f"Archived {session.platform.display_name} session {session.id} to {path}")
+
+
+@main.command()
+@click.argument("session_id")
+@click.option("--from", "source", type=PLATFORM_CHOICE, help="Only look for SESSION_ID on this platform.")
+def restore(session_id: str, source: Optional[str]) -> None:
+    """Move an archived session back so its agent can resume it."""
+    session = _find_session(session_id, source, archived=True)
+    path = get_adapter(session.platform).restore_session(session)
+    click.echo(f"Restored {session.platform.display_name} session {session.id} to {path}")
+
+
+@main.command()
+@click.argument("session_id")
+@click.argument("title")
+@click.option("--from", "source", type=PLATFORM_CHOICE, help="Only look for SESSION_ID on this platform.")
+def rename(session_id: str, title: str, source: Optional[str]) -> None:
+    """Give a session a new TITLE, shown by Agent Commander and by the agent itself."""
+    session = _find_session(session_id, source)
+    try:
+        get_adapter(session.platform).rename_session(session, title)
+    except NotImplementedError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Renamed {session.id} to \"{title}\"")
 
 
 @main.command()

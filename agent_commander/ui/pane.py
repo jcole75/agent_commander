@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 from typing import Optional
+from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
@@ -41,13 +43,15 @@ class CommanderPane(Widget):
         self.sessions: list[UnifiedSession] = []
         self.filtered_sessions: list[UnifiedSession] = []
         self.filter_query: str = ""
+        self.content_matches: Optional[set[str]] = None  # ids whose text matched a full-text search
+        self.show_archived: bool = False
         self.is_active: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static("", id=f"{self.pane_id}-header", classes="pane-header")
             yield Input(
-                placeholder="Filter sessions (Esc to cancel)...",
+                placeholder="Filter by title; Enter searches inside conversations (Esc closes)",
                 id=f"{self.pane_id}-filter",
                 classes="pane-filter-box",
             )
@@ -82,13 +86,22 @@ class CommanderPane(Widget):
         if self.platform != new_platform:
             self.platform = new_platform
             self.filter_query = ""
+            self.content_matches = None
             self.refresh_sessions()
+
+    def toggle_archive_view(self) -> None:
+        self.show_archived = not self.show_archived
+        self.content_matches = None
+        self.refresh_sessions()
 
     def refresh_sessions(self) -> None:
         adapter = get_adapter(self.platform)
         try:
-            self.sessions = adapter.scan_sessions(limit=300)
-        except Exception as e:
+            if self.show_archived:
+                self.sessions = adapter.scan_archived_sessions(limit=1000)
+            else:
+                self.sessions = adapter.scan_sessions(limit=300)
+        except Exception:
             self.sessions = []
 
         self._apply_filter()
@@ -103,8 +116,19 @@ class CommanderPane(Widget):
             self.filtered_sessions = [
                 s for s in self.sessions
                 if q in s.title.lower() or q in s.id.lower() or (s.cwd and q in s.cwd.lower())
+                or (self.content_matches is not None and s.id in self.content_matches)
             ]
         self._populate_table()
+
+    def search_contents(self, query: str) -> int:
+        """Full-text search through every session in the pane; returns how many matched."""
+        self.filter_query = query
+        adapter = get_adapter(self.platform)
+        self.content_matches = {s.id for s in self.sessions if query and adapter.contains_text(s, query)}
+        self._apply_filter()
+        self._update_header()
+        self._update_status()
+        return len(self.filtered_sessions)
 
     def _populate_table(self) -> None:
         table = self.query_one(f"#{self.pane_id}-table", DataTable)
@@ -113,7 +137,7 @@ class CommanderPane(Widget):
 
         for idx, session in enumerate(self.filtered_sessions):
             tag_str = "[bold yellow]*[/]" if session.tagged else " "
-            title_text = session.title or f"Session {session.short_id}"
+            title_text = Text(session.title or f"Session {session.short_id}")
             table.add_row(
                 tag_str,
                 session.date_short,
@@ -133,10 +157,13 @@ class CommanderPane(Widget):
         header = self.query_one(f"#{self.pane_id}-header", Static)
         pane_name = "LEFT" if "left" in self.pane_id else "RIGHT"
         active_mark = "► " if self.is_active else "  "
+        adapter = get_adapter(self.platform)
+        where = adapter.archive_dir if self.show_archived else adapter.base_dir
+        view = " [bold reverse] ARCHIVE [/]" if self.show_archived else ""
         header.update(
-            f"{active_mark}[bold]{pane_name}: {self.platform.display_name}[/]  "
+            f"{active_mark}[bold]{pane_name}: {self.platform.display_name}[/]{view}  "
             f"({len(self.filtered_sessions)} sessions)  "
-            f"[italic]{str(self.platform.default_dir)}[/]"
+            f"[italic]{escape(str(where))}[/]"
         )
 
     def _update_status(self) -> None:
@@ -205,11 +232,25 @@ class CommanderPane(Widget):
             box.add_class("visible")
             box.focus()
 
+    def key_escape(self) -> None:
+        box = self.query_one(f"#{self.pane_id}-filter", Input)
+        if box.has_class("visible"):
+            box.value = ""  # clears the filter via on_input_changed
+            self.toggle_filter()
+
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == f"{self.pane_id}-filter":
             self.filter_query = event.value
+            self.content_matches = None
             self._apply_filter()
+            self._update_header()
             self._update_status()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == f"{self.pane_id}-filter" and event.value.strip():
+            found = self.search_contents(event.value.strip())
+            self.app.notify(f"{found} conversation(s) mention \"{event.value.strip()}\".")
+            self.query_one(f"#{self.pane_id}-table", DataTable).focus()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         session = self.get_current_session()

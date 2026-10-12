@@ -7,7 +7,7 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static, Label
+from textual.widgets import Button, Input, Label, Static
 
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession
@@ -208,11 +208,14 @@ class HelpDialog(ModalScreen[None]):
                 "• [bold cyan]F2 / p[/]        : Select Platform for active pane\n"
                 "• [bold cyan]1, 2, 3, 4[/]    : Quick switch (1:Codex, 2:AGY, 3:Claude, 4:Grok)\n"
                 "• [bold cyan]F3 / v[/]        : View conversation transcript & tool calls\n"
-                "• [bold cyan]F4 / /[/]        : Filter conversations by search term\n"
+                "• [bold cyan]F4 / /[/]        : Find: filter by title; Enter searches inside conversations\n"
                 "• [bold cyan]F5 / c[/]        : Copy to the other pane (native session or Markdown)\n"
-                "• [bold cyan]F6 / r[/]        : Refresh pane from disk\n"
+                "• [bold cyan]F6 / n[/]        : Rename session (the agent shows the new name too)\n"
                 "• [bold cyan]F7 / e[/]        : Export session to Markdown (~/AgentCommander/exports)\n"
-                "• [bold cyan]F8 / d[/]        : Delete / Archive session\n"
+                "• [bold cyan]F8 / d[/]        : Archive session (in the archive view: restore)\n"
+                "• [bold cyan]Shift+F8 / Del[/]: Delete permanently (asks first)\n"
+                "• [bold cyan]F9 / a[/]        : Toggle archive view for the active pane\n"
+                "• [bold cyan]Ctrl+R / r[/]    : Re-read pane from disk\n"
                 "• [bold cyan]F10 / q[/]       : Quit Agent Commander\n"
             )
             with Horizontal(classes="dialog-buttons"):
@@ -225,4 +228,77 @@ class HelpDialog(ModalScreen[None]):
         self.dismiss(None)
 
     def key_enter(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmDialog(ModalScreen[bool]):
+    """Yes/no confirmation; Enter or Y confirms, Esc or N cancels."""
+
+    DEFAULT_CSS = """
+    ConfirmDialog {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }
+    """
+
+    def __init__(self, title: str, message: str, confirm_label: str = "Yes") -> None:
+        super().__init__()
+        self.title_text = title
+        self.message = message
+        self.confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Static(self.title_text, classes="dialog-title")
+            yield Static(self.message)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button(f"{self.confirm_label} (Y)", id="btn-yes", variant="error")
+                yield Button("Cancel (Esc)", id="btn-no", variant="primary")
+
+    def on_mount(self) -> None:
+        # Destructive by default? No: focus Cancel so a stray Enter does nothing harmful.
+        self.query_one("#btn-no", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "btn-yes")
+
+    def key_y(self) -> None:
+        self.dismiss(True)
+
+    def key_n(self) -> None:
+        self.dismiss(False)
+
+    def key_escape(self) -> None:
+        self.dismiss(False)
+
+
+class RenameDialog(ModalScreen[str | None]):
+    """Ask for a new session title; returns it, or None when cancelled."""
+
+    DEFAULT_CSS = """
+    RenameDialog {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.6);
+    }
+    """
+
+    def __init__(self, session: UnifiedSession) -> None:
+        super().__init__()
+        self.session = session
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Static(f"Rename {self.session.platform.display_name} session", classes="dialog-title")
+            yield Static(f"[italic]{escape(self.session.id)}[/]")
+            yield Input(value=self.session.title, id="rename-input")
+            yield Static("Enter to save, Esc to cancel. The agent shows the same name.")
+
+    def on_mount(self) -> None:
+        self.query_one("#rename-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        title = event.value.strip()
+        self.dismiss(title if title and title != self.session.title else None)
+
+    def key_escape(self) -> None:
         self.dismiss(None)

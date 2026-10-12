@@ -287,6 +287,17 @@ class ClaudeAdapter(BasePlatformAdapter):
 
         return out_path
 
+    def owned_paths(self, session: UnifiedSession) -> list[Path]:
+        # <id>.jsonl plus the <id>/ folder that holds subagent transcripts and tool results.
+        return [session.raw_path, session.raw_path.with_suffix("")]
+
+    def rename_session(self, session: UnifiedSession, title: str) -> None:
+        # Same record /rename writes; the last one in the file wins.
+        with open(session.raw_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"type": "custom-title", "customTitle": title, "sessionId": session.id}, ensure_ascii=False) + "\n")
+        session.title = first_line_title(title)
+        self._cache.pop(session.raw_path, None)
+
     def get_resume_command(self, session: UnifiedSession) -> list[str] | None:
         cli = self.platform.resolve_cli_path() or "claude"
         return [cli, "--resume", session.id]

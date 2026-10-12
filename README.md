@@ -47,11 +47,14 @@
 | `F2` / `p` | Select Platform for the active pane (Codex, AGY, Claude, Grok) |
 | `1` / `2` / `3` / `4` | Quick-switch platform (`1`: Codex, `2`: AGY, `3`: Claude, `4`: Grok) |
 | `F3` / `v` | View conversation transcript details & tool calls |
-| `F4` / `/` | Filter conversations by query |
-| `F5` / `c` | **Copy** selected conversations to the other pane's platform |
-| `F6` / `r` | Refresh session lists from disk |
-| `F7` / `e` | Export selected conversations to Markdown |
-| `F8` / `d` | Delete / archive session |
+| `F4` / `/` | **Find**: filter by title as you type; press Enter to search inside every conversation |
+| `F5` / `c` | **Copy** selected conversations to the other pane (native session or Markdown) |
+| `F6` / `n` | **Rename** a session; Claude Code and Codex show the new name too |
+| `F7` / `e` | Export the current conversation to Markdown |
+| `F8` / `d` | **Archive** selected sessions (in the archive view: restore them) |
+| `Shift+F8` / `Del` | Delete selected sessions permanently, after confirming |
+| `F9` / `a` | Toggle the archive view for the active pane |
+| `Ctrl+R` / `r` | Re-read the pane from disk |
 | `F10` / `q` | Quit Agent Commander |
 
 ---
@@ -88,6 +91,18 @@ ac export 6f1c                     # same as copy --markdown, to ~/AgentCommande
 
 `ac copy` prints the command to resume the copy. Run it from the session's project folder,
 because both Claude Code and Codex look sessions up by folder.
+
+### Archiving
+
+F8 moves a session out of the agent's list without deleting it, and F8 in the archive view
+(F9) puts it back. Codex sessions go to Codex's own `archived_sessions` folder (using
+`codex archive` when the Codex CLI is installed, so `codex resume` and Codex's own
+"archived" list agree). Claude Code has no archive, so Agent Commander keeps Claude sessions
+in `~/AgentCommander/archive/claude/`. That also keeps them safe from Claude Code's
+automatic clean-up of old transcripts (`cleanupPeriodDays`, 30 days by default).
+
+The same is available on the command line: `ac archive <id>`, `ac restore <id>`,
+`ac rename <id> "New title"`, `ac search claude "flaky test"`.
 
 ### How copies work
 
