@@ -28,7 +28,7 @@
 - **Classic Norton Commander Layout**: Side-by-side orthodox dual panes with the unmistakable DOS blue and cyan retro aesthetic.
 - **Multi-Platform Agent Aggregator**: Auto-discovers and reads sessions from Codex, Google Antigravity, Claude Code, and Grok Build.
 - **Multi-Select Tagging**: Use `Space` or `Insert` to tag one or multiple conversations with `[*]`.
-- **Cross-Pane Conversation Copying (`F5`)**: Seamlessly copy selected sessions from one pane's platform to the other with bidirectional JSONL/schema translation.
+- **Cross-Pane Conversation Copying (`F5`)**: Copy selected sessions to the other pane as a **native session** you can resume there (`claude --resume`, `codex resume`), or as a **Markdown transcript** (saved to `~/AgentCommander/exports` and put on the clipboard).
 - **Direct Agent Resumption (`Enter`)**: Press Enter on any session to resume directly in the agent's native CLI (`codex resume <id>`, `grok --resume <id>`, etc.) via terminal suspend, or inspect turns and tool calls in the built-in Conversation Viewer.
 - **Fast Search & Filter (`F4`)**: Real-time filtering across conversation titles, prompts, and IDs.
 - **Offline & Safe**: Operates directly on local JSONL storage; never touches remote APIs without user command.
@@ -73,6 +73,32 @@ Or use the handy shorthand:
 ```bash
 ac
 ```
+
+### Command line
+
+Everything the commander does with copies is also available as commands:
+
+```bash
+ac list codex                      # newest Codex sessions: id, date, turns, title
+ac copy 0199a3f2 --to claude       # copy a session (id or unique prefix) into Claude Code
+ac copy 6f1c --to codex            # ...or into Codex
+ac copy 6f1c --markdown -o chat.md # write a Markdown transcript instead
+ac export 6f1c                     # same as copy --markdown, to ~/AgentCommander/exports
+```
+
+`ac copy` prints the command to resume the copy. Run it from the session's project folder,
+because both Claude Code and Codex look sessions up by folder.
+
+### How copies work
+
+A copied session keeps every prompt and reply. Each assistant turn also carries a short
+record of the tools it ran and what they returned, written as text: tool calls and
+reasoning are tied to the agent that produced them (Claude Code rejects foreign thinking
+blocks; Codex encrypts its reasoning), so they are not replayed as native tool calls.
+The first prompt ends with a note saying where the conversation came from, and the copy
+is titled "<original title> (from <agent>)". The original session is never changed.
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are honoured if you have moved either tool's data folder.
 
 ---
 

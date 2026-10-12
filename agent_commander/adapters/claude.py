@@ -1,18 +1,25 @@
 """Claude Code platform adapter."""
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 import uuid
 
 from agent_commander.adapters._util import file_mtime, first_line_title, iter_jsonl, parse_ts, stringify, utc_iso
 from agent_commander.adapters.base import BasePlatformAdapter
+from agent_commander.converters.portable import import_note, to_portable_turns
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession, UnifiedMessage, ToolCall
 
+
+# Transcript schema version written into imported sessions (matches Claude Code 2.1.x).
+CLAUDE_TRANSCRIPT_VERSION = "2.1.296"
+# Model name recorded on imported assistant turns, which no Claude model actually produced.
+IMPORTED_MODEL = "agent-commander-import"
 
 # Text Claude Code injects as "user" turns that the person never typed.
 _NOISE_PREFIXES = (
@@ -218,50 +225,65 @@ class ClaudeAdapter(BasePlatformAdapter):
         session.messages = messages
         return messages
 
+    def project_dir(self, cwd: str) -> Path:
+        """Claude Code keeps each project's sessions in a folder named after the encoded cwd."""
+        encoded = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+        return self.base_dir / encoded[:200]
+
     def write_session(self, session: UnifiedSession, dest_dir: Optional[Path] = None) -> Path:
-        target_dir = dest_dir or (self.base_dir / "imported")
+        """Write a native Claude Code transcript that `claude --resume <id>` can load."""
+        cwd = session.cwd or os.getcwd()
+        target_dir = dest_dir or self.project_dir(cwd)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         new_id = str(uuid.uuid4())
         out_path = target_dir / f"{new_id}.jsonl"
-        now_iso = utc_iso()
+        note = import_note(session) if session.platform != self.platform else None
+        turns = to_portable_turns(session, note=note)
 
+        base = {
+            "isSidechain": False,
+            "userType": "external",
+            "cwd": cwd,
+            "sessionId": new_id,
+            "version": CLAUDE_TRANSCRIPT_VERSION,
+            "entrypoint": "cli",
+        }
+        start = session.created_at or datetime.now().astimezone()
         records: list[dict] = []
-        for msg in session.messages:
-            msg_iso = utc_iso(msg.timestamp)
-            content_blocks = []
-            if msg.thinking:
-                content_blocks.append({"type": "thinking", "thinking": msg.thinking})
-            if msg.content:
-                content_blocks.append({"type": "text", "text": msg.content})
-            for tc in msg.tool_calls:
-                content_blocks.append({
-                    "type": "tool_use",
-                    "id": str(uuid.uuid4()),
-                    "name": tc.name,
-                    "input": tc.args,
-                })
-                if tc.output:
-                    content_blocks.append({
-                        "type": "tool_result",
-                        "content": tc.output,
-                    })
-
-            records.append({
-                "sessionId": new_id,
-                "cwd": session.cwd or os.getcwd(),
-                "timestamp": msg_iso,
-                "type": msg.role,
-                "message": {
-                    "role": msg.role if msg.role in ("user", "assistant") else "assistant",
-                    "content": content_blocks,
-                    "model": session.model or "claude-3-7-sonnet",
+        parent = None
+        for idx, turn in enumerate(turns):
+            entry_id = str(uuid.uuid4())
+            ts = utc_iso(start + timedelta(seconds=idx))
+            if turn.role == "user":
+                message = {"role": "user", "content": turn.text}
+            else:
+                message = {
+                    "id": f"msg_ac_{uuid.uuid4().hex[:24]}",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": IMPORTED_MODEL,
+                    "content": [{"type": "text", "text": turn.text}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
                 }
+            records.append({
+                **base,
+                "parentUuid": parent,
+                "type": turn.role,
+                "message": message,
+                "uuid": entry_id,
+                "timestamp": ts,
             })
+            parent = entry_id
 
-        with open(out_path, "w", encoding="utf-8") as f:
+        title = session.title if session.platform == self.platform else f"{session.title} (from {session.platform.display_name})"
+        records.append({"type": "custom-title", "customTitle": title, "sessionId": new_id})
+
+        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
             for rec in records:
-                f.write(json.dumps(rec) + "\n")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         return out_path
 
