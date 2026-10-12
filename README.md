@@ -61,21 +61,46 @@
 
 ## 🚀 Installation & Running
 
-### Run directly with Python:
-```bash
-python -m agent_commander
-```
+Works on macOS, Windows and Linux.
 
-### Install in editable development mode:
-```bash
-pip install -e .
-agent-commander
-```
+### Download (no Python needed)
 
-Or use the handy shorthand:
+Grab the file for your system from the [latest release](https://github.com/jcole75/agent_commander/releases/latest):
+
+| System | File |
+|---|---|
+| macOS (Apple silicon) | `ac-macos-arm64` |
+| Windows | `ac-windows-x86_64.exe` |
+| Linux | `ac-linux-x86_64` |
+
+On macOS and Linux, make it executable and put it on your PATH, e.g.
+`chmod +x ac-macos-arm64 && mv ac-macos-arm64 /usr/local/bin/ac`.
+The builds are not code-signed yet: on macOS, clear the download flag once with
+`xattr -d com.apple.quarantine /usr/local/bin/ac`; on Windows, choose "More info → Run anyway"
+the first time SmartScreen asks.
+
+### Install with pipx (Python 3.10+)
+
 ```bash
+pipx install git+https://github.com/jcole75/agent_commander
 ac
 ```
+
+### From a checkout
+
+```bash
+pip install -e ".[dev]"
+ac                 # or: agent-commander, python -m agent_commander
+python -m pytest   # tests run against sample sessions in tests/fixtures
+```
+
+Set `AC_CODEX_BIN` to a Codex CLI to also run the tests that check copies and archives
+against the real Codex.
+
+### Releasing
+
+Push a tag such as `v0.2.0`. The Release workflow builds the three executables, tests
+each one, and attaches them (plus a wheel) to a GitHub release.
 
 ### Command line
 
