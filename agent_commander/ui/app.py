@@ -12,7 +12,7 @@ from textual.widgets import Static
 
 from agent_commander import __version__
 from agent_commander.adapters.registry import get_adapter
-from agent_commander.converters.translator import SessionTranslator
+from agent_commander.converters.translator import SessionTranslator, default_export_dir, export_path
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession
 from agent_commander.ui.commander import DualPaneCommander
@@ -26,6 +26,8 @@ from agent_commander.ui.function_bar import FunctionBar
 from agent_commander.ui.pane import CommanderPane
 from agent_commander.ui.theme import NC_CSS
 from agent_commander.ui.viewer import ConversationViewer
+
+PANE_ONLY_ACTIONS = {"switch_pane", "toggle_tag", "enter_session"}
 
 
 class AgentCommanderApp(App):
@@ -88,6 +90,12 @@ class AgentCommanderApp(App):
     def commander(self) -> DualPaneCommander:
         return self.query_one(DualPaneCommander)
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Tab, Space and Enter are priority bindings for the panes; inside a dialog they belong to the dialog.
+        if action in PANE_ONLY_ACTIONS and len(self.screen_stack) > 1:
+            return False
+        return True
+
     def action_switch_pane(self) -> None:
         self.commander.switch_active_pane()
 
@@ -143,32 +151,41 @@ class AgentCommanderApp(App):
             self.notify("Source and destination panes are the same platform!", severity="warning")
             return
 
-        def on_confirm(confirmed: bool) -> None:
-            if not confirmed:
+        def on_confirm(mode: str | None) -> None:
+            if not mode:
                 return
-            copied_count = 0
+            done: list[Path] = []
             for session in selected:
                 try:
-                    SessionTranslator.copy_session(
-                        session=session,
-                        dest_platform=dest_pane.platform,
-                    )
-                    copied_count += 1
+                    if mode == "markdown":
+                        done.append(SessionTranslator.export_to_markdown(session, export_path(session)))
+                    else:
+                        done.append(SessionTranslator.copy_session(session=session, dest_platform=dest_pane.platform))
                 except Exception as e:
                     self.notify(f"Error copying {session.short_id}: {e}", severity="error")
 
-            # Refresh destination pane and clear tags on source
-            dest_pane.refresh_sessions()
             source_pane.untag_all()
-            self.notify(
-                f"Successfully copied {copied_count} session(s) to {dest_pane.platform.display_name}!"
-            )
+            if not done:
+                return
+            if mode == "markdown":
+                if len(done) == 1:
+                    self.copy_to_clipboard(done[0].read_text(encoding="utf-8"))
+                    self.notify(f"Saved {done[0]} and copied it to the clipboard.")
+                else:
+                    self.notify(f"Saved {len(done)} transcripts to {default_export_dir()}.")
+            else:
+                dest_pane.refresh_sessions()
+                self.notify(
+                    f"Copied {len(done)} session(s) to {dest_pane.platform.display_name}. "
+                    "Press Enter on one there to resume it."
+                )
 
         self.push_screen(
             CopyConfirmDialog(
                 sessions=selected,
                 source_platform=source_pane.platform,
                 dest_platform=dest_pane.platform,
+                export_dir=default_export_dir(),
             ),
             on_confirm,
         )
@@ -179,11 +196,9 @@ class AgentCommanderApp(App):
             self.notify("No conversation selected to export.", severity="warning")
             return
 
-        export_dir = Path.cwd() / "exports"
-        export_file = export_dir / f"{session.platform.value}_{session.id[:8]}.md"
         try:
-            out_path = SessionTranslator.export_to_markdown(session, export_file)
-            self.notify(f"Exported to: {out_path.name}")
+            out_path = SessionTranslator.export_to_markdown(session, export_path(session))
+            self.notify(f"Exported to {out_path}")
         except Exception as e:
             self.notify(f"Export failed: {e}", severity="error")
 
@@ -233,8 +248,12 @@ class AgentCommanderApp(App):
             print(f"Session: {session.title} ({session.id})")
             print(f"Command: {' '.join(cmd)}")
             print("=" * 60 + "\n")
+            # Both CLIs look sessions up by project folder, so resume from the session's own cwd.
+            cwd = session.cwd if session.cwd and Path(session.cwd).is_dir() else None
+            if session.cwd and not cwd:
+                print(f"Note: the session's folder {session.cwd} does not exist here; resuming from the current folder.")
             try:
-                subprocess.run(cmd, check=False)
+                subprocess.run(cmd, check=False, cwd=cwd)
             except FileNotFoundError:
                 print(f"\n[Error] Executable '{cmd[0]}' not found on system PATH.")
                 print("Press Enter to return to Agent Commander...")

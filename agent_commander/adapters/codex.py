@@ -1,18 +1,33 @@
 """Codex platform adapter."""
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import re
+import secrets
+import time
 from typing import Optional
 import uuid
 
 from agent_commander.adapters._util import file_mtime, first_line_title, iter_jsonl, parse_ts, stringify, utc_iso
 from agent_commander.adapters.base import BasePlatformAdapter
+from agent_commander.converters.portable import import_note, to_portable_turns
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession, UnifiedMessage, ToolCall
+
+
+# cli_version recorded in imported rollouts' session_meta.
+CODEX_ROLLOUT_VERSION = "0.162.1"
+
+
+def _uuid7() -> str:
+    """Time-ordered UUID (v7), the format Codex uses for thread ids."""
+    value = (int(time.time() * 1000) << 80) | secrets.randbits(80)
+    value = (value & ~(0xF << 76)) | (0x7 << 76)  # version 7
+    value = (value & ~(0x3 << 62)) | (0x2 << 62)  # RFC 4122 variant
+    return str(uuid.UUID(int=value))
 
 
 # Context Codex injects as "user" messages (AGENTS.md, environment, etc.), not typed by the person.
@@ -59,6 +74,14 @@ def _parse_args(arguments):
 
 def _output_text(output) -> str:
     # function_call_output.output is a string, {"content": ..., "success": ...}, or a list of content items.
+    # Shell outputs are often a JSON string of the form {"output": ..., "metadata": {...}}.
+    if isinstance(output, str) and output.startswith("{"):
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("output"), str):
+            return parsed["output"]
     if isinstance(output, dict) and "content" in output:
         return stringify(output.get("content"))
     return stringify(output)
@@ -97,10 +120,13 @@ class CodexAdapter(BasePlatformAdapter):
             if len(found_files) >= limit:
                 break
 
+        names = self._thread_names()
         for path in found_files[:limit]:
             try:
                 session = self._parse_session_header(path)
                 if session:
+                    if session.id in names:
+                        session.title = first_line_title(names[session.id])
                     sessions.append(session)
             except Exception:
                 continue
@@ -261,98 +287,72 @@ class CodexAdapter(BasePlatformAdapter):
         return messages
 
     def write_session(self, session: UnifiedSession, dest_dir: Optional[Path] = None) -> Path:
-        target_dir = dest_dir or (self.base_dir / datetime.now().strftime("%Y/%m/%d"))
+        """Write a native Codex rollout that `codex resume <id>` can load."""
+        now = datetime.now(timezone.utc)
+        target_dir = dest_dir or (self.base_dir / now.strftime("%Y/%m/%d"))
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        new_id = str(uuid.uuid4())
-        ts_now = datetime.now()
-        timestamp_prefix = ts_now.strftime("%Y-%m-%dT%H-%M-%S")
-        filename = f"rollout-{timestamp_prefix}-{new_id}.jsonl"
-        out_path = target_dir / filename
+        new_id = _uuid7()
+        out_path = target_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_id}.jsonl"
+        note = import_note(session) if session.platform != self.platform else None
+        turns = to_portable_turns(session, note=note)
+        cwd = session.cwd or os.getcwd()
 
-        records: list[dict] = []
-        ordinal = 0
+        def line(ts: str, kind: str, payload: dict) -> dict:
+            return {"timestamp": ts, "type": kind, "payload": payload}
 
-        # Session metadata line
-        records.append({
-            "timestamp": utc_iso(ts_now),
-            "ordinal": ordinal,
-            "type": "session_meta",
-            "payload": {
-                "session_id": new_id,
-                "id": new_id,
-                "timestamp": utc_iso(ts_now),
-                "cwd": session.cwd or os.getcwd(),
-                "cli_version": "imported",
-                "source": "agent_commander",
-            }
-        })
-        ordinal += 1
+        records: list[dict] = [line(utc_iso(now), "session_meta", {
+            "session_id": new_id,
+            "id": new_id,
+            "timestamp": utc_iso(now),
+            "cwd": cwd,
+            "originator": "agent_commander",
+            "cli_version": CODEX_ROLLOUT_VERSION,
+            "source": "cli",
+        })]
+        start = session.created_at or now
+        for idx, turn in enumerate(turns):
+            ts = utc_iso(start + timedelta(seconds=idx))
+            # response_item is what the model sees on resume; event_msg is what the Codex UI shows.
+            if turn.role == "user":
+                records.append(line(ts, "response_item", {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": turn.text}],
+                }))
+                records.append(line(ts, "event_msg", {"type": "user_message", "message": turn.text, "images": []}))
+            else:
+                records.append(line(ts, "response_item", {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": turn.text}],
+                }))
+                records.append(line(ts, "event_msg", {"type": "agent_message", "message": turn.text}))
 
-        for msg in session.messages:
-            msg_ts = utc_iso(msg.timestamp or ts_now)
-
-            if msg.thinking:
-                records.append({
-                    "timestamp": msg_ts,
-                    "ordinal": ordinal,
-                    "type": "response_item",
-                    "payload": {
-                        "type": "reasoning",
-                        "id": str(uuid.uuid4()),
-                        "summary": msg.thinking[:100],
-                        "content": msg.thinking,
-                    }
-                })
-                ordinal += 1
-
-            if msg.content:
-                records.append({
-                    "timestamp": msg_ts,
-                    "ordinal": ordinal,
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "id": str(uuid.uuid4()),
-                        "role": msg.role if msg.role in ("user", "system", "assistant") else "assistant",
-                        "content": [{"type": "text", "text": msg.content}],
-                    }
-                })
-                ordinal += 1
-
-            for tc in msg.tool_calls:
-                call_id = str(uuid.uuid4())
-                records.append({
-                    "timestamp": msg_ts,
-                    "ordinal": ordinal,
-                    "type": "response_item",
-                    "payload": {
-                        "type": "custom_tool_call",
-                        "call_id": call_id,
-                        "name": tc.name,
-                        "input": tc.args,
-                    }
-                })
-                ordinal += 1
-
-                if tc.output:
-                    records.append({
-                        "timestamp": msg_ts,
-                        "ordinal": ordinal,
-                        "type": "response_item",
-                        "payload": {
-                            "type": "custom_tool_call_output",
-                            "call_id": call_id,
-                            "output": tc.output,
-                        }
-                    })
-                    ordinal += 1
-
-        with open(out_path, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8", newline="\n") as f:
             for rec in records:
-                f.write(json.dumps(rec) + "\n")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+        title = session.title if session.platform == self.platform else f"{session.title} (from {session.platform.display_name})"
+        if dest_dir is None:
+            self._append_thread_name(new_id, title)
         return out_path
+
+    @property
+    def session_index_path(self) -> Path:
+        # Thread names set with /rename (or by us) live in CODEX_HOME/session_index.jsonl.
+        return self.base_dir.parent / "session_index.jsonl"
+
+    def _append_thread_name(self, thread_id: str, name: str) -> None:
+        entry = {"id": thread_id, "thread_name": name, "updated_at": utc_iso().replace(".000Z", "Z")}
+        with open(self.session_index_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _thread_names(self) -> dict[str, str]:
+        names: dict[str, str] = {}
+        if self.session_index_path.exists():
+            for entry in iter_jsonl(self.session_index_path):
+                if entry.get("id") and entry.get("thread_name"):
+                    names[entry["id"]] = entry["thread_name"]  # newest entry wins
+        return names
 
     def get_resume_command(self, session: UnifiedSession) -> list[str] | None:
         cli = self.platform.resolve_cli_path() or "codex"

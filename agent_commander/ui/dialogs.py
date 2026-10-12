@@ -1,6 +1,9 @@
 """Modal dialogs for Agent Commander."""
 
 from __future__ import annotations
+from pathlib import Path
+
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
@@ -10,8 +13,8 @@ from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession
 
 
-class CopyConfirmDialog(ModalScreen[bool]):
-    """Dialog confirming copy of sessions between panes."""
+class CopyConfirmDialog(ModalScreen[str | None]):
+    """Dialog confirming a copy between panes; returns "native", "markdown" or None."""
 
     DEFAULT_CSS = """
     CopyConfirmDialog {
@@ -25,47 +28,52 @@ class CopyConfirmDialog(ModalScreen[bool]):
         sessions: list[UnifiedSession],
         source_platform: AgentPlatform,
         dest_platform: AgentPlatform,
+        export_dir: Path,
     ) -> None:
         super().__init__()
         self.sessions = sessions
         self.source_platform = source_platform
         self.dest_platform = dest_platform
+        self.export_dir = export_dir
 
     def compose(self) -> ComposeResult:
+        count = len(self.sessions)
         with Vertical(classes="dialog-box"):
-            yield Static("╔══════════════════════════════════════════════════════════╗", classes="dialog-title")
-            yield Static(f"  COPY CONVERSATION(S) ({len(self.sessions)} item{'s' if len(self.sessions)>1 else ''})", classes="dialog-title")
-            yield Static("╚══════════════════════════════════════════════════════════╝", classes="dialog-title")
-
+            yield Static(f"COPY {count} CONVERSATION{'S' if count > 1 else ''}", classes="dialog-title")
             yield Static(f"From: [bold yellow]{self.source_platform.display_name}[/]")
-            yield Static(f"To:   [bold green]{self.dest_platform.display_name}[/]")
-            yield Static(f"Target Directory: [italic]{self.dest_platform.default_dir}[/]")
+            yield Static(f"To:   [bold #55ff55]{self.dest_platform.display_name}[/]")
             yield Static("")
 
-            summary_items = []
-            for s in self.sessions[:3]:
-                summary_items.append(f" • [bold]{s.title}[/] ({s.date_str})")
-            if len(self.sessions) > 3:
-                summary_items.append(f" • ... and {len(self.sessions) - 3} more")
-
+            summary_items = [f" • [bold]{escape(s.title)}[/] ({s.date_str})" for s in self.sessions[:3]]
+            if count > 3:
+                summary_items.append(f" • ... and {count - 3} more")
             yield Static("\n".join(summary_items))
             yield Static("")
+            yield Static(
+                f"[bold]\\[N][/] Native session: resume it with [italic]{self.dest_platform.value}[/] "
+                f"in the same folder. Tool calls are kept as text."
+            )
+            yield Static(f"[bold]\\[M][/] Markdown transcript: saved to {escape(str(self.export_dir))} to paste anywhere.")
 
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Copy (Enter)", id="btn-copy", variant="success")
+                yield Button("Native (Enter)", id="btn-native", variant="success")
+                yield Button("Markdown (M)", id="btn-markdown", variant="primary")
                 yield Button("Cancel (Esc)", id="btn-cancel", variant="error")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-copy":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
+        self.dismiss({"btn-native": "native", "btn-markdown": "markdown"}.get(event.button.id))
 
     def key_enter(self) -> None:
-        self.dismiss(True)
+        self.dismiss("native")
+
+    def key_n(self) -> None:
+        self.dismiss("native")
+
+    def key_m(self) -> None:
+        self.dismiss("markdown")
 
     def key_escape(self) -> None:
-        self.dismiss(False)
+        self.dismiss(None)
 
 
 class PlatformSelectDialog(ModalScreen[AgentPlatform | None]):
@@ -138,7 +146,7 @@ class ActionResumeDialog(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog-box"):
             yield Static(f"Enter Agent: {self.session.platform.display_name}", classes="dialog-title")
-            yield Static(f"Session: [bold yellow]{self.session.title}[/]")
+            yield Static(f"Session: [bold yellow]{escape(self.session.title)}[/]")
             yield Static(f"ID: [italic]{self.session.id}[/] | Turns: {self.session.message_count}")
             yield Static("")
 
@@ -201,9 +209,9 @@ class HelpDialog(ModalScreen[None]):
                 "• [bold cyan]1, 2, 3, 4[/]    : Quick switch (1:Codex, 2:AGY, 3:Claude, 4:Grok)\n"
                 "• [bold cyan]F3 / v[/]        : View conversation transcript & tool calls\n"
                 "• [bold cyan]F4 / /[/]        : Filter conversations by search term\n"
-                "• [bold cyan]F5 / c[/]        : Copy selected conversations to opposite pane\n"
+                "• [bold cyan]F5 / c[/]        : Copy to the other pane (native session or Markdown)\n"
                 "• [bold cyan]F6 / r[/]        : Refresh pane from disk\n"
-                "• [bold cyan]F7 / e[/]        : Export session to Markdown\n"
+                "• [bold cyan]F7 / e[/]        : Export session to Markdown (~/AgentCommander/exports)\n"
                 "• [bold cyan]F8 / d[/]        : Delete / Archive session\n"
                 "• [bold cyan]F10 / q[/]       : Quit Agent Commander\n"
             )

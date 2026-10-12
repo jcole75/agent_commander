@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 from pathlib import Path
+import re
 from typing import Optional
 
 from agent_commander.adapters.registry import get_adapter
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession
+
+
+def default_export_dir() -> Path:
+    """Where Markdown transcripts go unless the user picks a folder."""
+    return Path.home() / "AgentCommander" / "exports"
+
+
+def export_path(session: UnifiedSession, export_dir: Optional[Path] = None) -> Path:
+    stamp = (session.updated_at or session.created_at).strftime("%Y%m%d-%H%M") if (session.updated_at or session.created_at) else "undated"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", session.title).strip("-").lower()[:40] or "session"
+    return (export_dir or default_export_dir()) / f"{session.platform.value}_{stamp}_{slug}_{session.id[:8]}.md"
 
 
 class SessionTranslator:
@@ -18,31 +30,11 @@ class SessionTranslator:
         dest_platform: AgentPlatform,
         dest_dir: Optional[Path] = None,
     ) -> Path:
-        """Copies and translates a unified session to a target agent platform."""
-        source_adapter = get_adapter(session.platform)
-        dest_adapter = get_adapter(dest_platform)
-
-        # Ensure messages are loaded
+        """Copy a session into another platform's native storage; returns the new file."""
         if not session.messages:
-            source_adapter.load_messages(session)
-
-        # Clone metadata for target platform
-        translated_session = UnifiedSession(
-            id=session.id,
-            platform=dest_platform,
-            title=session.title,
-            raw_path=session.raw_path,
-            created_at=session.created_at,
-            updated_at=session.updated_at,
-            cwd=session.cwd,
-            model=session.model,
-            message_count=len(session.messages),
-            size_bytes=session.size_bytes,
-            messages=session.messages,
-        )
-
-        dest_path = dest_adapter.write_session(translated_session, dest_dir=dest_dir)
-        return dest_path
+            get_adapter(session.platform).load_messages(session)
+        # The destination adapter reads session.platform to label where the copy came from.
+        return get_adapter(dest_platform).write_session(session, dest_dir=dest_dir)
 
     @staticmethod
     def export_to_markdown(session: UnifiedSession, out_path: Path) -> Path:
