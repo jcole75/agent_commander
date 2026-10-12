@@ -1,0 +1,53 @@
+# Builds the standalone `ac` executable on each OS and smoke-tests it.
+# Called by CI (pull requests) and by the release workflow (tags).
+name: Build
+
+on:
+  workflow_call:
+
+jobs:
+  executable:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: ac-linux-x86_64
+          - os: macos-latest
+            asset: ac-macos-arm64
+          - os: windows-latest
+            asset: ac-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install . pyinstaller
+      - name: Build
+        run: >
+          pyinstaller --onefile --name ac --noconfirm
+          --collect-submodules agent_commander --collect-data textual
+          packaging/ac_entry.py
+      - name: Smoke test
+        env:
+          HOME: ${{ github.workspace }}/tests/fixtures/home
+          USERPROFILE: ${{ github.workspace }}/tests/fixtures/home
+        run: |
+          exe=dist/ac; [ -f dist/ac.exe ] && exe=dist/ac.exe
+          "$exe" --version
+          "$exe" list codex | tee out.txt
+          grep -q "Run the tests and fix whatever fails" out.txt
+          "$exe" list claude | grep -q "Verbose flag for demo CLI"
+      - name: Name for this platform
+        run: |
+          if [ -f dist/ac.exe ]; then mv dist/ac.exe "dist/${{ matrix.asset }}"; else mv dist/ac "dist/${{ matrix.asset }}"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
