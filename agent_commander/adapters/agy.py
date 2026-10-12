@@ -9,6 +9,7 @@ import re
 from typing import Optional
 import uuid
 
+from agent_commander.adapters._util import parse_ts, utc_iso
 from agent_commander.adapters.base import BasePlatformAdapter
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession, UnifiedMessage, ToolCall
@@ -52,7 +53,7 @@ class AgyAdapter(BasePlatformAdapter):
                 return None
 
         stat = transcript_path.stat()
-        mtime = datetime.fromtimestamp(stat.st_mtime)
+        mtime = datetime.fromtimestamp(stat.st_mtime).astimezone()
         title = ""
         created_at = mtime
         message_count = 0
@@ -72,7 +73,7 @@ class AgyAdapter(BasePlatformAdapter):
 
                     if created_str and idx == 0:
                         try:
-                            created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                            created_at = parse_ts(created_str) or created_at
                         except Exception:
                             pass
 
@@ -128,7 +129,7 @@ class AgyAdapter(BasePlatformAdapter):
                     ts = None
                     if ts_str:
                         try:
-                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            ts = parse_ts(ts_str)
                         except Exception:
                             pass
 
@@ -179,10 +180,10 @@ class AgyAdapter(BasePlatformAdapter):
 
         step_index = 0
         records: list[dict] = []
-        now_iso = datetime.now().isoformat() + "Z"
+        now_iso = utc_iso()
 
         for msg in session.messages:
-            msg_iso = (msg.timestamp or datetime.now()).isoformat() + "Z"
+            msg_iso = utc_iso(msg.timestamp)
             if msg.role == "user":
                 records.append({
                     "step_index": step_index,

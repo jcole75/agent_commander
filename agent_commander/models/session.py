@@ -14,6 +14,7 @@ class ToolCall:
     name: str
     args: dict[str, Any] | str = field(default_factory=dict)
     output: Optional[str] = None
+    id: Optional[str] = None
 
 
 @dataclass

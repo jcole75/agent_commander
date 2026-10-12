@@ -1,0 +1,2 @@
+{"type": "USER_INPUT", "content": "<USER_REQUEST>Profile the slow import</USER_REQUEST>", "created_at": "2026-09-29T12:00:00Z"}
+{"type": "PLANNER_RESPONSE", "content": "The slow import is pandas.", "created_at": "2026-09-29T12:00:04Z"}
