@@ -160,6 +160,7 @@ Screen {
 }
 
 .message-card {
+    height: auto;
     margin-bottom: 1;
     padding: 1;
     border: round #00aaaa;
@@ -180,6 +181,7 @@ Screen {
 }
 
 .message-thinking {
+    height: auto;
     border: dashed #ffff55;
     color: #ffffaa;
     background: #000044;

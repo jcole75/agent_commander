@@ -9,35 +9,87 @@ import re
 from typing import Optional
 import uuid
 
+from agent_commander.adapters._util import file_mtime, first_line_title, iter_jsonl, parse_ts, stringify, utc_iso
 from agent_commander.adapters.base import BasePlatformAdapter
 from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession, UnifiedMessage, ToolCall
 
 
+# Context Codex injects as "user" messages (AGENTS.md, environment, etc.), not typed by the person.
+_CONTEXT_PREFIXES = (
+    "<environment_context>",
+    "<user_instructions>",
+    "<permissions instructions>",
+    "<collaboration_mode>",
+    "<turn_aborted>",
+    "<user_shell_command>",
+    "# AGENTS.md instructions",
+)
+
+
+def _is_context(text: str) -> bool:
+    stripped = text.lstrip()
+    if stripped.startswith(_CONTEXT_PREFIXES):
+        return True
+    # Any message that is entirely one XML-style block is injected context.
+    return bool(re.fullmatch(r"<([a-z_ ]+)>.*</\1>", stripped.strip(), re.DOTALL))
+
+
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for item in content or []:
+        if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
+            parts.append(item.get("text", ""))
+        elif isinstance(item, str):
+            parts.append(item)
+    return "\n".join(p for p in parts if p)
+
+
+def _parse_args(arguments):
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+            return parsed if isinstance(parsed, dict) else arguments
+        except json.JSONDecodeError:
+            return arguments
+    return arguments if arguments is not None else {}
+
+
+def _output_text(output) -> str:
+    # function_call_output.output is a string, {"content": ..., "success": ...}, or a list of content items.
+    if isinstance(output, dict) and "content" in output:
+        return stringify(output.get("content"))
+    return stringify(output)
+
+
 class CodexAdapter(BasePlatformAdapter):
-    """Adapter for OpenAI Codex sessions stored in ~/.codex/sessions."""
+    """Adapter for OpenAI Codex rollouts in ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]."""
 
     platform = AgentPlatform.CODEX
+
+    def __init__(self, base_dir: Optional[Path] = None):
+        super().__init__(base_dir)
+        self._cache: dict[Path, tuple[tuple[float, int], UnifiedSession]] = {}
 
     def scan_sessions(self, limit: int = 200) -> list[UnifiedSession]:
         sessions: list[UnifiedSession] = []
         if not self.base_dir.exists():
             return sessions
 
-        # Fast hierarchical traversal: sessions/YYYY/MM/DD/rollout-*.jsonl
-        # Years, months, and days sort naturally chronologically
+        # sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl; names sort chronologically.
         found_files: list[Path] = []
-        years = sorted([y for y in self.base_dir.iterdir() if y.is_dir() and y.name.isdigit()], reverse=True)
-        for y in years:
-            months = sorted([m for m in y.iterdir() if m.is_dir() and m.name.isdigit()], reverse=True)
-            for m in months:
-                days = sorted([d for d in m.iterdir() if d.is_dir() and d.name.isdigit()], reverse=True)
-                for d in days:
-                    day_files = sorted(d.glob("*.jsonl"), reverse=True)
-                    for f in day_files:
-                        found_files.append(f)
-                        if len(found_files) >= limit:
-                            break
+
+        def _dirs(parent: Path) -> list[Path]:
+            return sorted((d for d in parent.iterdir() if d.is_dir() and d.name.isdigit()), reverse=True)
+
+        for y in _dirs(self.base_dir):
+            for m in _dirs(y):
+                for d in _dirs(m):
+                    files = [f for f in d.iterdir() if f.name.startswith("rollout-") and
+                             (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst"))]
+                    found_files.extend(sorted(files, key=lambda f: f.name, reverse=True))
                     if len(found_files) >= limit:
                         break
                 if len(found_files) >= limit:
@@ -45,7 +97,7 @@ class CodexAdapter(BasePlatformAdapter):
             if len(found_files) >= limit:
                 break
 
-        for path in found_files:
+        for path in found_files[:limit]:
             try:
                 session = self._parse_session_header(path)
                 if session:
@@ -57,187 +109,153 @@ class CodexAdapter(BasePlatformAdapter):
 
     def _parse_session_header(self, path: Path) -> Optional[UnifiedSession]:
         stat = path.stat()
-        mtime = datetime.fromtimestamp(stat.st_mtime)
+        key = (stat.st_mtime, stat.st_size)
+        cached = self._cache.get(path)
+        if cached and cached[0] == key:
+            return cached[1]
 
-        session_id = path.stem
-        match = re.search(r"([0-9a-fA-F-]{36})", path.stem)
-        if match:
-            session_id = match.group(1)
+        match = re.search(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})", path.name)
+        session_id = match.group(1) if match else path.name.split(".")[0]
 
+        saw_meta = False
         title = ""
+        fallback_title = ""
         cwd = None
-        created_at = mtime
-        message_count = 0
+        created_at = None
         model = None
+        message_count = 0
 
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line_idx in range(60):
-                if line_idx > 20 and title:
-                    break
-                line = f.readline()
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
+        for data in iter_jsonl(path):
+            dtype = data.get("type")
+            payload = data.get("payload") or {}
+
+            if dtype == "session_meta":
+                # Later session_meta lines can be copied in from fork history; the first one wins.
+                if not saw_meta:
+                    saw_meta = True
+                    session_id = payload.get("id") or session_id
+                    cwd = payload.get("cwd")
+                    created_at = parse_ts(payload.get("timestamp"))
+            elif dtype == "turn_context":
+                model = payload.get("model") or model
+            elif dtype == "event_msg" and payload.get("type") == "user_message" and not title:
+                text = payload.get("message") or ""
+                if text.strip() and not _is_context(text):
+                    title = text
+            elif dtype == "response_item" and payload.get("type") == "message":
+                role = payload.get("role")
+                if role not in ("user", "assistant"):
                     continue
-                try:
-                    data = json.loads(line)
-                    dtype = data.get("type")
-                    payload = data.get("payload") or {}
-
-                    if dtype == "session_meta":
-                        session_id = payload.get("session_id") or session_id
-                        cwd = payload.get("cwd")
-                        if "timestamp" in payload:
-                            try:
-                                created_at = datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00"))
-                            except Exception:
-                                pass
-
-                    elif dtype == "response_item":
-                        ptype = payload.get("type")
-                        if ptype == "message":
-                            message_count += 1
-                            role = payload.get("role", "")
-                            content = payload.get("content", [])
-                            if role == "user" and not title:
-                                txt = ""
-                                if isinstance(content, str):
-                                    txt = content.strip()
-                                elif isinstance(content, list):
-                                    for item in content:
-                                        if isinstance(item, dict) and item.get("type") in ("text", "input_text"):
-                                            t = item.get("text", "").strip()
-                                            if t:
-                                                txt = t
-                                                break
-                                        elif isinstance(item, str) and item.strip():
-                                            txt = item.strip()
-                                            break
-                                
-                                # Skip system-injected tags masquerading as user messages
-                                is_xml_tag = txt.startswith("<") and (">" in txt.splitlines()[0] or txt.endswith(">"))
-                                if txt and not is_xml_tag:
-                                    title = txt.splitlines()[0].strip()
-                        elif ptype == "turn_context" and not model:
-                            model = payload.get("model")
-                except Exception:
+                text = _content_text(payload.get("content"))
+                if not text.strip() or (role == "user" and _is_context(text)):
                     continue
+                message_count += 1
+                if role == "user" and not fallback_title:
+                    fallback_title = text
 
-        if not title:
-            title = f"Codex Session ({session_id[:8]})"
-        elif len(title) > 60:
-            title = title[:57] + "..."
+        if not saw_meta and not message_count:
+            return None
 
-        return UnifiedSession(
+        mtime = file_mtime(path)
+        session = UnifiedSession(
             id=session_id,
             platform=self.platform,
-            title=title,
+            title=first_line_title(title or fallback_title) or f"Codex Session ({session_id[:8]})",
             raw_path=path,
-            created_at=created_at,
+            created_at=created_at or mtime,
             updated_at=mtime,
             cwd=cwd,
             model=model or "Codex",
-            message_count=max(message_count, 1),
+            message_count=message_count,
             size_bytes=stat.st_size,
         )
+        self._cache[path] = (key, session)
+        return session
 
     def load_messages(self, session: UnifiedSession) -> list[UnifiedMessage]:
         messages: list[UnifiedMessage] = []
         if not session.raw_path.exists():
+            session.messages = messages
             return messages
 
-        pending_tool_calls: dict[str, ToolCall] = {}
+        pending: dict[str, ToolCall] = {}
+        # Reasoning and tool calls between two assistant/user messages are folded into one assistant turn.
+        turn: Optional[UnifiedMessage] = None
 
-        with open(session.raw_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        def _turn(ts) -> UnifiedMessage:
+            nonlocal turn
+            if turn is None:
+                turn = UnifiedMessage(role="assistant", content="", timestamp=ts)
+                messages.append(turn)
+            return turn
+
+        def _add_call(ts, tc: ToolCall) -> None:
+            _turn(ts).tool_calls.append(tc)
+            if tc.id:
+                pending[tc.id] = tc
+
+        for data in iter_jsonl(session.raw_path):
+            dtype = data.get("type")
+            payload = data.get("payload") or {}
+            ts = parse_ts(data.get("timestamp"))
+
+            if dtype == "compacted":
+                turn = None
+                messages.append(UnifiedMessage(
+                    role="system",
+                    content="[Conversation compacted]\n" + (payload.get("message") or ""),
+                    timestamp=ts,
+                ))
+                continue
+            if dtype != "response_item":
+                continue
+
+            ptype = payload.get("type")
+            if ptype == "message":
+                role = payload.get("role", "assistant")
+                text = _content_text(payload.get("content")).strip()
+                if role not in ("user", "assistant") or not text:
                     continue
-                try:
-                    data = json.loads(line)
-                    dtype = data.get("type")
-                    payload = data.get("payload") or {}
-                    ts_str = data.get("timestamp")
-                    ts = None
-                    if ts_str:
-                        try:
-                            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        except Exception:
-                            pass
-
-                    if dtype == "response_item":
-                        ptype = payload.get("type")
-                        if ptype == "message":
-                            role = payload.get("role", "assistant")
-                            content_obj = payload.get("content", "")
-                            text = ""
-                            if isinstance(content_obj, str):
-                                text = content_obj
-                            elif isinstance(content_obj, list):
-                                parts = []
-                                for part in content_obj:
-                                    if isinstance(part, dict):
-                                        if part.get("type") in ("text", "input_text"):
-                                            parts.append(part.get("text", ""))
-                                    elif isinstance(part, str):
-                                        parts.append(part)
-                                text = "\n".join(parts)
-
-                            if text.strip():
-                                messages.append(UnifiedMessage(
-                                    role=role,
-                                    content=text,
-                                    timestamp=ts,
-                                ))
-
-                        elif ptype == "reasoning":
-                            def _extract_text(obj) -> str:
-                                if isinstance(obj, str):
-                                    return obj
-                                elif isinstance(obj, list):
-                                    items = []
-                                    for item in obj:
-                                        if isinstance(item, str):
-                                            items.append(item)
-                                        elif isinstance(item, dict):
-                                            txt = item.get("text") or item.get("content") or ""
-                                            if txt:
-                                                items.append(txt)
-                                    return "\n".join(items)
-                                return str(obj) if obj else ""
-
-                            summary = _extract_text(payload.get("summary"))
-                            content = _extract_text(payload.get("content"))
-                            thinking_text = summary or content
-                            if thinking_text.strip():
-                                messages.append(UnifiedMessage(
-                                    role="assistant",
-                                    content="",
-                                    thinking=thinking_text.strip(),
-                                    timestamp=ts,
-                                ))
-
-                        elif ptype == "custom_tool_call":
-                            call_id = payload.get("call_id") or payload.get("id", "")
-                            name = payload.get("name", "tool")
-                            tool_input = payload.get("input", {})
-                            tc = ToolCall(name=name, args=tool_input)
-                            pending_tool_calls[call_id] = tc
-                            messages.append(UnifiedMessage(
-                                role="tool",
-                                content=f"Tool Call: {name}",
-                                tool_calls=[tc],
-                                timestamp=ts,
-                            ))
-
-                        elif ptype == "custom_tool_call_output":
-                            call_id = payload.get("call_id", "")
-                            output = payload.get("output", "")
-                            if call_id in pending_tool_calls:
-                                pending_tool_calls[call_id].output = str(output)
-                except Exception:
+                if role == "user":
+                    turn = None
+                    if not _is_context(text):
+                        messages.append(UnifiedMessage(role="user", content=text, timestamp=ts, raw_payload=payload))
                     continue
+                # An assistant message closes the turn; any reasoning or tool calls before it belong to it.
+                current = _turn(ts)
+                current.content = text
+                current.raw_payload = payload
+                turn = None
+
+            elif ptype == "reasoning":
+                summary = stringify(payload.get("summary")) or stringify(payload.get("content"))
+                if summary.strip():
+                    current = _turn(ts)
+                    current.thinking = "\n\n".join(p for p in (current.thinking or "", summary.strip()) if p)
+
+            elif ptype in ("function_call", "custom_tool_call"):
+                raw_args = payload.get("arguments") if ptype == "function_call" else payload.get("input")
+                _add_call(ts, ToolCall(
+                    name=payload.get("name", "tool"),
+                    args=_parse_args(raw_args),
+                    id=payload.get("call_id"),
+                ))
+
+            elif ptype == "local_shell_call":
+                action = payload.get("action") or {}
+                _add_call(ts, ToolCall(name="shell", args={"command": action.get("command")}, id=payload.get("call_id")))
+
+            elif ptype == "web_search_call":
+                action = payload.get("action") or {}
+                _add_call(ts, ToolCall(name="web_search", args={"query": action.get("query")}, id=payload.get("id")))
+
+            elif ptype in ("function_call_output", "custom_tool_call_output"):
+                tc = pending.get(payload.get("call_id") or "")
+                output = _output_text(payload.get("output"))
+                if tc is not None:
+                    tc.output = output
+                else:
+                    _add_call(ts, ToolCall(name="tool_result", output=output, id=payload.get("call_id")))
 
         session.messages = messages
         return messages
@@ -257,13 +275,13 @@ class CodexAdapter(BasePlatformAdapter):
 
         # Session metadata line
         records.append({
-            "timestamp": ts_now.isoformat() + "Z",
+            "timestamp": utc_iso(ts_now),
             "ordinal": ordinal,
             "type": "session_meta",
             "payload": {
                 "session_id": new_id,
                 "id": new_id,
-                "timestamp": ts_now.isoformat() + "Z",
+                "timestamp": utc_iso(ts_now),
                 "cwd": session.cwd or os.getcwd(),
                 "cli_version": "imported",
                 "source": "agent_commander",
@@ -272,7 +290,7 @@ class CodexAdapter(BasePlatformAdapter):
         ordinal += 1
 
         for msg in session.messages:
-            msg_ts = (msg.timestamp or ts_now).isoformat() + "Z"
+            msg_ts = utc_iso(msg.timestamp or ts_now)
 
             if msg.thinking:
                 records.append({

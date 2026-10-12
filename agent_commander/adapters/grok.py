@@ -44,7 +44,7 @@ class GrokAdapter(BasePlatformAdapter):
 
     def _parse_session_dir(self, chat_file: Path) -> Optional[UnifiedSession]:
         stat = chat_file.stat()
-        mtime = datetime.fromtimestamp(stat.st_mtime)
+        mtime = datetime.fromtimestamp(stat.st_mtime).astimezone()
         session_id = chat_file.parent.name
         project_encoded = chat_file.parent.parent.name
         project_path = urllib.parse.unquote(project_encoded)

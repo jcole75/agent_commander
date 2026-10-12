@@ -36,10 +36,15 @@ class AgentPlatform(str, Enum):
     @property
     def default_dir(self) -> Path:
         home = Path.home()
+        # Honour the same overrides the agent CLIs themselves use.
+        codex_home = Path(os.environ["CODEX_HOME"]) if os.environ.get("CODEX_HOME") else home / ".codex"
+        claude_home = (
+            Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else home / ".claude"
+        )
         paths = {
-            AgentPlatform.CODEX: home / ".codex" / "sessions",
+            AgentPlatform.CODEX: codex_home / "sessions",
             AgentPlatform.AGY: home / ".gemini" / "antigravity" / "brain",
-            AgentPlatform.CLAUDE: home / ".claude" / "projects",
+            AgentPlatform.CLAUDE: claude_home / "projects",
             AgentPlatform.GROK: home / ".grok" / "sessions",
         }
         return paths.get(self, home)
