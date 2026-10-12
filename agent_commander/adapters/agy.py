@@ -229,6 +229,11 @@ class AgyAdapter(BasePlatformAdapter):
 
         return out_path
 
+    def owned_paths(self, session: UnifiedSession) -> list[Path]:
+        # The whole <base>/<session-id>/ folder belongs to the session.
+        rel = session.raw_path.resolve().relative_to(self.base_dir.resolve())
+        return [self.base_dir / rel.parts[0]]
+
     def get_resume_command(self, session: UnifiedSession) -> list[str] | None:
         cli = self.platform.resolve_cli_path()
         if cli:

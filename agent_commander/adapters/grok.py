@@ -203,6 +203,10 @@ class GrokAdapter(BasePlatformAdapter):
 
         return out_path
 
+    def owned_paths(self, session: UnifiedSession) -> list[Path]:
+        # <base>/<encoded project>/<session-id>/chat_history.jsonl: move the session folder.
+        return [session.raw_path.parent]
+
     def get_resume_command(self, session: UnifiedSession) -> list[str] | None:
         cli = self.platform.resolve_cli_path() or "grok"
         return [cli, "--resume", session.id]

@@ -48,6 +48,7 @@ class UnifiedSession:
     size_bytes: int = 0
     messages: list[UnifiedMessage] = field(default_factory=list)
     tagged: bool = False
+    archived: bool = False
 
     @property
     def date_str(self) -> str:

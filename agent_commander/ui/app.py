@@ -6,9 +6,10 @@ import subprocess
 import sys
 from typing import Optional
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from agent_commander import __version__
 from agent_commander.adapters.registry import get_adapter
@@ -17,7 +18,9 @@ from agent_commander.models.platform import AgentPlatform
 from agent_commander.models.session import UnifiedSession
 from agent_commander.ui.commander import DualPaneCommander
 from agent_commander.ui.dialogs import (
+    ConfirmDialog,
     CopyConfirmDialog,
+    RenameDialog,
     PlatformSelectDialog,
     ActionResumeDialog,
     HelpDialog,
@@ -55,12 +58,18 @@ class AgentCommanderApp(App):
         Binding("slash", "filter_sessions", "Filter", show=False),
         Binding("f5", "copy_sessions", "Copy"),
         Binding("c", "copy_sessions", "Copy", show=False),
-        Binding("f6", "refresh_pane", "Refresh"),
+        Binding("f6", "rename_session", "Rename"),
+        Binding("n", "rename_session", "Rename", show=False),
+        Binding("ctrl+r", "refresh_pane", "Refresh", show=False),
         Binding("r", "refresh_pane", "Refresh", show=False),
         Binding("f7", "export_session", "Export"),
         Binding("e", "export_session", "Export", show=False),
-        Binding("f8", "delete_session", "Delete"),
-        Binding("d", "delete_session", "Delete", show=False),
+        Binding("f8", "archive_session", "Archive"),
+        Binding("d", "archive_session", "Archive", show=False),
+        Binding("shift+f8", "delete_session", "Delete", show=False),
+        Binding("delete", "delete_session", "Delete", show=False),
+        Binding("f9", "toggle_archive", "Archive view"),
+        Binding("a", "toggle_archive", "Archive view", show=False),
         Binding("f10", "quit", "Quit"),
         Binding("q", "quit", "Quit", show=False),
     ]
@@ -92,7 +101,8 @@ class AgentCommanderApp(App):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         # Tab, Space and Enter are priority bindings for the panes; inside a dialog they belong to the dialog.
-        if action in PANE_ONLY_ACTIONS and len(self.screen_stack) > 1:
+        # The same goes for the filter box, which needs Space and Enter for typing and searching.
+        if action in PANE_ONLY_ACTIONS and (len(self.screen_stack) > 1 or isinstance(self.focused, Input)):
             return False
         return True
 
@@ -202,18 +212,81 @@ class AgentCommanderApp(App):
         except Exception as e:
             self.notify(f"Export failed: {e}", severity="error")
 
+    def action_archive_session(self) -> None:
+        """F8: archive the selected sessions, or restore them when viewing the archive."""
+        pane = self.commander.active_pane
+        selected = pane.get_selected_sessions()
+        if not selected:
+            self.notify("No conversation selected.", severity="warning")
+            return
+        adapter = get_adapter(pane.platform)
+        restoring = pane.show_archived
+        done = 0
+        for session in selected:
+            try:
+                (adapter.restore_session if restoring else adapter.archive_session)(session)
+                done += 1
+            except Exception as e:
+                self.notify(f"Could not {'restore' if restoring else 'archive'} {session.short_id}: {e}", severity="error")
+        pane.refresh_sessions()
+        if done and restoring:
+            self.notify(f"Restored {done} session(s); {pane.platform.display_name} can resume them again.")
+        elif done:
+            self.notify(f"Archived {done} session(s). F9 shows the archive; F8 there restores.")
+
     def action_delete_session(self) -> None:
-        session = self.commander.active_pane.get_current_session()
+        """Shift+F8 / Del: permanently delete the selected sessions, after confirmation."""
+        pane = self.commander.active_pane
+        selected = pane.get_selected_sessions()
+        if not selected:
+            self.notify("No conversation selected.", severity="warning")
+            return
+        names = "\n".join(f" • {escape(s.title)}" for s in selected[:5])
+        more = f"\n • ... and {len(selected) - 5} more" if len(selected) > 5 else ""
+        hint = "" if pane.show_archived else "\n\nF8 archives instead, which you can undo."
+
+        def on_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            adapter = get_adapter(pane.platform)
+            deleted = sum(1 for s in selected if adapter.delete_session(s))
+            pane.refresh_sessions()
+            self.notify(f"Permanently deleted {deleted} session(s).")
+
+        self.push_screen(
+            ConfirmDialog(
+                f"Delete {len(selected)} session(s) for good?",
+                f"{names}{more}{hint}",
+                confirm_label="Delete",
+            ),
+            on_confirm,
+        )
+
+    def action_toggle_archive(self) -> None:
+        pane = self.commander.active_pane
+        pane.toggle_archive_view()
+        self.notify("Showing the archive. F8 restores, Shift+F8 deletes." if pane.show_archived
+                    else f"Showing {pane.platform.display_name} sessions.")
+
+    def action_rename_session(self) -> None:
+        pane = self.commander.active_pane
+        session = pane.get_current_session()
         if not session:
             self.notify("No conversation selected.", severity="warning")
             return
 
-        adapter = get_adapter(session.platform)
-        if adapter.delete_session(session):
-            self.commander.active_pane.refresh_sessions()
-            self.notify(f"Deleted {session.short_id}.")
-        else:
-            self.notify(f"Could not delete {session.short_id}.", severity="error")
+        def on_title(title: str | None) -> None:
+            if not title:
+                return
+            try:
+                get_adapter(session.platform).rename_session(session, title)
+            except Exception as e:
+                self.notify(str(e), severity="error")
+                return
+            pane.refresh_sessions()
+            self.notify(f"Renamed to \"{title}\".")
+
+        self.push_screen(RenameDialog(session), on_title)
 
     def action_enter_session(self) -> None:
         session = self.commander.active_pane.get_current_session()
@@ -222,7 +295,9 @@ class AgentCommanderApp(App):
             return
 
         def on_action(choice: str | None) -> None:
-            if choice == "resume":
+            if choice == "resume" and session.archived:
+                self.notify("Restore this session first (F8), then resume it.", severity="warning")
+            elif choice == "resume":
                 self.resume_session_cli(session)
             elif choice == "view":
                 self.push_screen(ConversationViewer(session))
@@ -270,9 +345,10 @@ class AgentCommanderApp(App):
             "3": self.action_view_session,
             "4": self.action_filter_sessions,
             "5": self.action_copy_sessions,
-            "6": self.action_refresh_pane,
+            "6": self.action_rename_session,
             "7": self.action_export_session,
-            "8": self.action_delete_session,
+            "8": self.action_archive_session,
+            "9": self.action_toggle_archive,
             "Enter": self.action_enter_session,
             "10": self.action_quit,
         }

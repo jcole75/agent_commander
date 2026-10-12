@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import subprocess
 import time
 from typing import Optional
 import uuid
@@ -40,6 +42,11 @@ _CONTEXT_PREFIXES = (
     "<user_shell_command>",
     "# AGENTS.md instructions",
 )
+
+
+def _rollouts(folder: Path) -> list[Path]:
+    return [f for f in folder.iterdir() if f.is_file() and f.name.startswith("rollout-")
+            and (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst"))]
 
 
 def _is_context(text: str) -> bool:
@@ -97,9 +104,8 @@ class CodexAdapter(BasePlatformAdapter):
         self._cache: dict[Path, tuple[tuple[float, int], UnifiedSession]] = {}
 
     def scan_sessions(self, limit: int = 200) -> list[UnifiedSession]:
-        sessions: list[UnifiedSession] = []
         if not self.base_dir.exists():
-            return sessions
+            return []
 
         # sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl; names sort chronologically.
         found_files: list[Path] = []
@@ -110,9 +116,7 @@ class CodexAdapter(BasePlatformAdapter):
         for y in _dirs(self.base_dir):
             for m in _dirs(y):
                 for d in _dirs(m):
-                    files = [f for f in d.iterdir() if f.name.startswith("rollout-") and
-                             (f.name.endswith(".jsonl") or f.name.endswith(".jsonl.zst"))]
-                    found_files.extend(sorted(files, key=lambda f: f.name, reverse=True))
+                    found_files.extend(sorted(_rollouts(d), key=lambda f: f.name, reverse=True))
                     if len(found_files) >= limit:
                         break
                 if len(found_files) >= limit:
@@ -120,8 +124,12 @@ class CodexAdapter(BasePlatformAdapter):
             if len(found_files) >= limit:
                 break
 
+        return self._sessions_from_files(found_files[:limit])
+
+    def _sessions_from_files(self, files: list[Path]) -> list[UnifiedSession]:
+        sessions: list[UnifiedSession] = []
         names = self._thread_names()
-        for path in found_files[:limit]:
+        for path in files:
             try:
                 session = self._parse_session_header(path)
                 if session:
@@ -130,8 +138,75 @@ class CodexAdapter(BasePlatformAdapter):
                     sessions.append(session)
             except Exception:
                 continue
-
         return sessions
+
+    # --- Archive: Codex's own layout, CODEX_HOME/archived_sessions/<rollout file> ---------------
+
+    @property
+    def archive_dir(self) -> Path:
+        return self.base_dir.parent / "archived_sessions"
+
+    def scan_archived_sessions(self, limit: int = 200) -> list[UnifiedSession]:
+        if not self.archive_dir.exists():
+            return []
+        files = sorted(_rollouts(self.archive_dir), key=lambda f: f.name, reverse=True)[:limit]
+        sessions = self._sessions_from_files(files)
+        for s in sessions:
+            s.archived = True
+        return sessions
+
+    def _run_codex(self, *args: str) -> bool:
+        """Use the Codex CLI when it is installed, so its own index stays in step with the files."""
+        if os.environ.get("AC_NO_AGENT_CLI"):
+            return False
+        cli = self.platform.resolve_cli_path()
+        if not cli:
+            return False
+        env = dict(os.environ, CODEX_HOME=str(self.base_dir.parent))
+        try:
+            result = subprocess.run([cli, *args], env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    def archive_session(self, session: UnifiedSession) -> Path:
+        target = self.archive_dir / session.raw_path.name
+        if self._run_codex("archive", session.id) and target.exists():
+            return target
+        if not session.raw_path.exists():
+            raise FileNotFoundError(f"{session.raw_path} no longer exists")
+        if target.exists():
+            raise FileExistsError(f"{target} already exists")
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(session.raw_path), str(target))
+        return target
+
+    def restore_session(self, session: UnifiedSession) -> Path:
+        match = re.match(r"rollout-(\d{4})-(\d{2})-(\d{2})T", session.raw_path.name)
+        if not match:
+            raise ValueError(f"Unexpected rollout name {session.raw_path.name}")
+        target = self.base_dir.joinpath(*match.groups()) / session.raw_path.name
+        if self._run_codex("unarchive", session.id) and target.exists():
+            return target
+        if not session.raw_path.exists():
+            raise FileNotFoundError(f"{session.raw_path} no longer exists")
+        if target.exists():
+            raise FileExistsError(f"{target} already exists")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(session.raw_path), str(target))
+        return target
+
+    def delete_session(self, session: UnifiedSession) -> bool:
+        if self._run_codex("delete", "--force", session.id) and not session.raw_path.exists():
+            return True
+        if session.raw_path.exists():
+            session.raw_path.unlink()
+            return True
+        return False
+
+    def rename_session(self, session: UnifiedSession, title: str) -> None:
+        self._append_thread_name(session.id, title)
+        session.title = first_line_title(title)
 
     def _parse_session_header(self, path: Path) -> Optional[UnifiedSession]:
         stat = path.stat()
